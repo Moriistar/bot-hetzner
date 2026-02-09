@@ -7,7 +7,7 @@ from hcloud import Client
 from hcloud.images.domain import Image
 from hcloud.server_types.domain import ServerType
 from hcloud.locations.domain import Location
-from hcloud.floating_ips.domain import FloatingIPType
+# خط ایمپورت FloatingIPType را حذف کردم چون باعث ارور میشد
 
 # --- 1. پیکربندی ---
 load_dotenv()
@@ -86,7 +86,7 @@ async def manage_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         server = hetzner.servers.get_by_id(server_id)
         
-        # دریافت آی‌پی‌های شناور (Floating IPs) متصل به این سرور
+        # دریافت آی‌پی‌های شناور
         floating_ips = hetzner.floating_ips.get_all()
         server_floating_ips = [ip.ip for ip in floating_ips if ip.server and ip.server.id == server.id]
         
@@ -121,7 +121,6 @@ async def server_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = data[1]
     server_id = int(data[2])
 
-    # تاییدیه
     if action in ['delete', 'changeip', 'addip'] and 'confirm' not in data:
         warn = "⚠️ **تایید عملیات**\n"
         if action == 'addip': warn += "آیا مطمئنید؟ آی‌پی اضافه در هتزنر هزینه دارد (حدود 4 یورو)."
@@ -148,40 +147,39 @@ async def server_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == 'addip' and 'confirm' in data:
             await query.edit_message_text("⏳ در حال خرید و اتصال آی‌پی جدید...")
-            # خرید آی‌پی شناور و اتصال به سرور
+            # اصلاح شده: استفاده از رشته ساده برای تایپ
             fip = hetzner.floating_ips.create(
-                type=FloatingIPType("ipv4"),
+                type="ipv4",
                 home_location=server.datacenter.location,
                 server=server
             )
-            msg = f"✅ آی‌پی جدید اضافه شد:\n`{fip.floating_ip.ip}`\n\n(نکته: ممکن است نیاز به تنظیم دستی کارت شبکه در سرور داشته باشید)"
+            msg = f"✅ آی‌پی جدید اضافه شد:\n`{fip.floating_ip.ip}`"
             await send_log(context, f"Added Floating IP {fip.floating_ip.ip} to {server.name}")
 
         elif action == 'changeip' and 'confirm' in data:
             await query.edit_message_text("♻️ در حال تعویض سرور...")
             old_name, old_loc, old_type = server.name, server.datacenter.location.name, server.server_type.name
             
-            # حذف آی‌پی‌های شناور قبل از حذف سرور (برای جلوگیری از هزینه)
+            # حذف آی‌پی‌های شناور قبل از حذف سرور
             floating_ips = hetzner.floating_ips.get_all()
             for fip in floating_ips:
                 if fip.server and fip.server.id == server.id:
                     fip.delete()
 
             server.delete()
-            
-            new_server = hetzner.servers.create(name=old_name, server_type=ServerType(name=old_type), image=Image(name="ubuntu-22.04"), location=Location(name=old_loc))
+            # استفاده از cx22 برای جلوگیری از ارور deprecated
+            new_server = hetzner.servers.create(name=old_name, server_type=ServerType(name="cx22"), image=Image(name="ubuntu-22.04"), location=Location(name=old_loc))
             msg = f"✅ آی‌پی اصلی تغییر کرد.\nIP جدید: `{new_server.server.public_net.ipv4.ip}`\nPass: `{new_server.root_password}`"
 
         elif action == 'delete' and 'confirm' in data:
             await query.answer("حذف...")
-            # حذف آی‌پی‌های شناور متصل
             floating_ips = hetzner.floating_ips.get_all()
             for fip in floating_ips:
                 if fip.server and fip.server.id == server.id:
                     fip.delete()
             
             server.delete()
-            await query.edit_message_text(f"✅ سرور {server.name} و آی‌پی‌های آن حذف شدند.", reply_markup=InlineKeyboardMarkup([[back_button('list_servers')]]))
+            await query.edit_message_text(f"✅ سرور {server.name} حذف شد.", reply_markup=InlineKeyboardMarkup([[back_button('list_servers')]]))
             return
 
         await query.edit_message_text(f"{msg}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data=f'manage_{server_id}')]]), parse_mode='Markdown')
@@ -202,6 +200,7 @@ async def create_server_finish(update: Update, context: ContextTypes.DEFAULT_TYP
     
     msg = await update.message.reply_text("⏳ ساخت سرور...")
     try:
+        # استفاده از cx22
         res = hetzner.servers.create(name=name, server_type=ServerType(name="cx22"), image=Image(name="ubuntu-22.04"), location=Location(name="nbg1"))
         await msg.edit_text(f"✅ انجام شد!\nIP: `{res.server.public_net.ipv4.ip}`\nPass: `{res.root_password}`", parse_mode='Markdown')
     except Exception as e:
