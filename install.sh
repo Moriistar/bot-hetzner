@@ -2,75 +2,93 @@
 
 # رنگ‌ها
 GREEN='\033[0;32m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${GREEN}=== Hetzner Bot Installer by MoriiStar ===${NC}"
+echo -e "${BLUE}=== نصب ربات مدیریت هتزنر (MoriiStar) ===${NC}"
 
-# 1. بررسی و نصب پیش‌نیازها
-echo "Updating system..."
-sudo apt update && sudo apt install -y python3 python3-pip python3-venv git
+# بررسی روت
+if [ "$EUID" -ne 0 ]; then
+  echo "لطفاً با دسترسی روت اجرا کنید (sudo)."
+  exit
+fi
 
-# 2. دانلود پروژه (یا ساخت پوشه اگر دستی اجرا شود)
+# نصب پکیج‌ها
+echo -e "${GREEN}>> نصب پیش‌نیازها...${NC}"
+apt-get update -y
+apt-get install -y python3 python3-pip python3-venv git
+
+# مسیر نصب
 INSTALL_DIR="/opt/bot-hetzner"
 
+# کلون یا آپدیت
 if [ -d "$INSTALL_DIR" ]; then
-    echo "Directory exists. Pulling latest changes..."
+    echo -e "${BLUE}>> آپدیت پروژه...${NC}"
     cd $INSTALL_DIR
     git pull
 else
-    echo "Cloning repository..."
-    # اگر ریپازیتوری هنوز عمومی نیست یا می‌خواهید فایل‌های لوکال را استفاده کنید، 
-    # این قسمت به طور پیش‌فرض فرض می‌کند فایل‌ها دانلود شده‌اند.
-    # اما برای دستور curl شما، ما اینجا کلون می‌کنیم:
-    sudo git clone https://github.com/Moriistar/bot-hetzner.git $INSTALL_DIR
+    echo -e "${GREEN}>> دانلود پروژه...${NC}"
+    git clone https://github.com/MoriiStar/bot-hetzner.git $INSTALL_DIR
     cd $INSTALL_DIR
 fi
 
-# 3. ساخت محیط مجازی پایتون
-echo "Setting up Python Virtual Environment..."
-python3 -m venv venv
+# محیط مجازی
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
+
 source venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# 4. دریافت اطلاعات از کاربر
-echo -e "${GREEN}--- Configuration ---${NC}"
-read -p "Enter Telegram Bot Token: " BOT_TOKEN
-read -p "Enter Admin Numeric ID: " ADMIN_ID
-read -p "Enter Hetzner Cloud API Token: " HETZNER_TOKEN
-read -p "Enter Log Channel ID (e.g., -100xxxx): " LOG_CHANNEL_ID
+# دریافت متغیرها
+echo -e "${BLUE}=== تنظیمات ===${NC}"
 
-# 5. ذخیره در .env
-cat > .env <<EOL
+setup_env() {
+    read -p "توکن ربات تلگرام: " BOT_TOKEN
+    read -p "آیدی عددی ادمین: " ADMIN_ID
+    read -p "توکن هتزنر (API Token): " HETZNER_TOKEN
+    read -p "آیدی کانال لاگ: " LOG_CHANNEL_ID
+
+    cat <<EOF > .env
 BOT_TOKEN=$BOT_TOKEN
 ADMIN_ID=$ADMIN_ID
 HETZNER_TOKEN=$HETZNER_TOKEN
 LOG_CHANNEL_ID=$LOG_CHANNEL_ID
-EOL
+EOF
+}
 
-# 6. ساخت سرویس Systemd برای اجرای دائم
-echo "Creating Systemd Service..."
-SERVICE_FILE="/etc/systemd/system/hetznerbot.service"
+if [ -f ".env" ]; then
+    read -p "تنظیمات موجود است. تغییر میدهید؟ (y/n): " reconfig
+    if [[ "$reconfig" =~ ^[Yy]$ ]]; then
+        setup_env
+    fi
+else
+    setup_env
+fi
 
-sudo cat > $SERVICE_FILE <<EOL
+# سرویس سیستم‌دی
+echo -e "${GREEN}>> ساخت سرویس...${NC}"
+SERVICE_FILE="/etc/systemd/system/bot-hetzner.service"
+
+cat <<EOF > $SERVICE_FILE
 [Unit]
-Description=Hetzner Telegram Bot
+Description=Hetzner Manager Bot by MoriiStar
 After=network.target
 
 [Service]
-Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/bot.py
+ExecStart=$INSTALL_DIR/venv/bin/python main.py
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOL
+EOF
 
-# 7. فعال‌سازی و استارت
-sudo systemctl daemon-reload
-sudo systemctl enable hetznerbot
-sudo systemctl restart hetznerbot
+systemctl daemon-reload
+systemctl enable bot-hetzner
+systemctl restart bot-hetzner
 
-echo -e "${GREEN}✅ Bot installed and started successfully!${NC}"
-echo "Check status with: systemctl status hetznerbot"
+echo -e "${GREEN}نصب تمام شد! ربات در حال اجراست.${NC}"
