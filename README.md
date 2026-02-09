@@ -25,7 +25,8 @@ A powerful Telegram bot to manage your Hetzner Cloud infrastructure directly fro
 برای نصب خودکار روی سرور، دستور زیر را در ترمینال اجرا کنید:
 
 ```
-bash <(curl -Ls [https://raw.githubusercontent.com/Moriistar/bot-hetzner/main/install.sh](https://raw.githubusercontent.com/Moriistar/bot-hetzner/main/install.sh))
+bash <(curl -Ls https://raw.githubusercontent.com/MoriiStar/bot-hetzner/main/install.sh)
+
 ```
 ⚙️ پیش‌نیازها قبل از نصب
 ​در حین نصب، اسکریپت موارد زیر را از شما می‌پرسد. لطفاً آن‌ها را آماده کنید:
