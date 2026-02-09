@@ -22,22 +22,21 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
 hetzner = Client(token=HETZNER_TOKEN)
 
 # مراحل گفتگو (Conversation States)
-# اضافه شدن SELECT_ARCH برای انتخاب پردازنده
 SELECT_ACTION, CREATE_NAME, SELECT_ARCH, CREATE_TYPE, CREATE_IMAGE, CONFIRM_DELETE, SELECT_IMAGE_REBUILD, SELECT_TYPE_RESCALE = range(8)
 
 # تنظیم لاگ
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- داده‌های ثابت ---
-# تفکیک پلن‌ها بر اساس پردازنده
-INTEL_PLANS = ["cx22", "cx32", "cx42", "cx52"]  # سری CX معمولا اینتل هستند
-AMD_PLANS = ["cpx11", "cpx21", "cpx31", "cpx41"] # سری CPX معمولا AMD هستند
+# --- داده‌های ثابت (اصلاح شده برای 2025/2026) ---
+# پلن CX11 حذف شده -> جایگزین: CX22
+INTEL_PLANS = ["cx22", "cx32", "cx42"]  # سری جدید Intel
+AMD_PLANS = ["cpx11", "cpx21", "cpx31"] # سری جدید AMD
 
-# لیست سیستم‌عامل‌ها
+# سیستم‌عامل‌ها
 OS_IMAGES = [
-    "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
-    "debian-12", "alma-9", "rocky-9"
+    "ubuntu-24.04", "ubuntu-22.04", 
+    "debian-12", "alma-9"
 ]
 
 # --- توابع کمکی ---
@@ -56,26 +55,34 @@ async def send_log(context: ContextTypes.DEFAULT_TYPE, message: str):
 
 # --- منوی اصلی ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update): return
-    
+    # اگر از طریق دکمه برگشت آمده باشد، query دارد
+    if update.callback_query:
+        await update.callback_query.answer()
+        message = update.callback_query.message
+    else:
+        if not await check_admin(update): return
+        message = update.message
+
     text = (
-        "👋 **به ربات مدیریت Hetzner خوش آمدید!**\n\n"
-        "امکانات جدید:\n"
-        "🔹 تفکیک پردازنده AMD/Intel\n"
-        "🔹 پشتیبانی از Ubuntu 20/22/24\n"
+        "👋 **پنل مدیریت Hetzner (نسخه جدید)**\n\n"
+        "امکانات فعال:\n"
+        "🖥 **مدیریت:** خاموش/روشن، ریست، حذف، کنسول\n"
+        "➕ **ساخت:** پشتیبانی از Intel CX22 و AMD CPX\n"
+        "⚙️ **تنظیمات:** نصب مجدد OS، ارتقا پلن\n"
     )
     keyboard = [
         [InlineKeyboardButton("🖥 لیست سرورها", callback_data='list_servers')],
         [InlineKeyboardButton("➕ ساخت سرور جدید", callback_data='create_start')],
-        [InlineKeyboardButton("💰 مشاهده پلن‌ها (قیمت)", callback_data='list_plans')],
+        [InlineKeyboardButton("💰 مشاهده پلن‌ها", callback_data='list_plans')],
         [InlineKeyboardButton("❌ بستن منو", callback_data='cancel_action')]
     ]
-    markup = InlineKeyboardMarkup(keyboard)
     
+    # اگر پیام قبلی وجود دارد آن را ویرایش کن، وگرنه پیام جدید بده
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=markup, parse_mode='Markdown')
+        await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
-        await update.message.reply_text(text, reply_markup=markup, parse_mode='Markdown')
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    
     return ConversationHandler.END
 
 # --- لیست پلن‌ها ---
@@ -84,15 +91,14 @@ async def list_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     text = (
-        "💰 **تعرفه سرورهای ابری:**\n\n"
+        "💰 **تعرفه پلن‌های جدید (2026):**\n\n"
         "🔴 **AMD (CPX Series):**\n"
-        "▫️ CPX11 (2CPU/2GB): ~€5.30\n"
-        "▫️ CPX21 (3CPU/4GB): ~€9.20\n"
-        "▫️ CPX31 (4CPU/8GB): ~€16.40\n\n"
+        "▫️ CPX11 (2CPU/2GB): ~€5.80\n"
+        "▫️ CPX21 (3CPU/4GB): ~€10.20\n\n"
         "🔵 **Intel (CX Series):**\n"
-        "▫️ CX22 (2CPU/4GB): ~€4.50\n"
-        "▫️ CX32 (4CPU/8GB): ~€9.40\n\n"
-        "⚠️ قیمت‌ها حدودی و بدون مالیات است."
+        "▫️ CX22 (2CPU/4GB): ~€5.20 (جایگزین CX11)\n"
+        "▫️ CX32 (4CPU/8GB): ~€10.60\n\n"
+        "⚠️ قیمت‌ها حدودی است."
     )
     keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data='main_menu')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -111,13 +117,12 @@ async def list_servers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         for server in servers:
             status = "🟢" if server.status == "running" else "🔴"
-            # نمایش IP و نام
-            keyboard.append([InlineKeyboardButton(f"{status} {server.name} | {server.public_net.ipv4.ip}", callback_data=f'manage_{server.id}')])
+            keyboard.append([InlineKeyboardButton(f"{status} {server.name} ({server.public_net.ipv4.ip})", callback_data=f'manage_{server.id}')])
         
         keyboard.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data='main_menu')])
-        await query.edit_message_text("لیست سرورهای شما:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("لیست سرورهای فعال:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
-        await query.edit_message_text(f"خطا: {e}")
+        await query.edit_message_text(f"خطا در دریافت لیست: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data='main_menu')]]))
 
 # --- مدیریت تکی سرور ---
 async def manage_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -128,26 +133,29 @@ async def manage_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         server = hetzner.servers.get_by_id(server_id)
+        # هندل کردن ایمیج‌هایی که ممکن است None باشند
+        img_name = server.image.name if server.image else "Custom/Snapshot"
+        
         info = (
             f"🖥 **{server.name}**\n"
             f"📍 IP: `{server.public_net.ipv4.ip}`\n"
-            f"🏢 DC: {server.datacenter.name}\n"
-            f"⚙️ Plan: {server.server_type.name}\n"
-            f"💿 OS: {server.image.name if server.image else 'Unknown'}\n"
-            f"📊 Status: {server.status}\n"
+            f"🏢 DC: `{server.datacenter.name}`\n"
+            f"⚙️ Plan: `{server.server_type.name}`\n"
+            f"💿 OS: `{img_name}`\n"
+            f"📊 Status: `{server.status}`\n"
         )
         
         keyboard = [
             [InlineKeyboardButton("🔄 Reboot", callback_data=f'act_reboot_{server_id}'), InlineKeyboardButton("⚠️ Reset", callback_data=f'act_reset_{server_id}')],
-            [InlineKeyboardButton("▶️ On", callback_data=f'act_on_{server_id}'), InlineKeyboardButton("⏹ Off", callback_data=f'act_off_{server_id}')],
+            [InlineKeyboardButton("▶️ Power On", callback_data=f'act_on_{server_id}'), InlineKeyboardButton("⏹ Power Off", callback_data=f'act_off_{server_id}')],
             [InlineKeyboardButton("💿 Reinstall", callback_data=f'pre_rebuild_{server_id}'), InlineKeyboardButton("🗑 DELETE", callback_data=f'pre_delete_{server_id}')],
             [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data='list_servers')]
         ]
         await query.edit_message_text(info, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     except Exception as e:
-        await query.edit_message_text(f"خطا: {e}")
+        await query.edit_message_text(f"خطا: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data='list_servers')]]))
 
-# --- اکشن‌های پاور ---
+# --- اکشن‌های پاور (Reboot, Off, On) ---
 async def power_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -155,17 +163,25 @@ async def power_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     server = hetzner.servers.get_by_id(server_id)
     
     try:
-        if action == 'reboot': server.reboot()
-        elif action == 'reset': server.reset()
-        elif action == 'on': server.power_on()
-        elif action == 'off': server.power_off()
+        if action == 'reboot': 
+            server.reboot()
+            msg = "دستور ریبوت (Soft) ارسال شد."
+        elif action == 'reset': 
+            server.reset()
+            msg = "دستور ریست (Hard) ارسال شد."
+        elif action == 'on': 
+            server.power_on()
+            msg = "سرور روشن شد."
+        elif action == 'off': 
+            server.power_off()
+            msg = "سرور خاموش شد."
         
-        await query.answer(f"دستور {action} ارسال شد.", show_alert=True)
+        await query.answer(msg, show_alert=True)
         await send_log(context, f"Action {action} on {server.name}")
     except Exception as e:
         await query.answer(f"Error: {e}", show_alert=True)
 
-# --- حذف سرور ---
+# --- حذف سرور (با تایید) ---
 async def pre_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     server_id = int(query.data.split('_')[2])
@@ -173,9 +189,9 @@ async def pre_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("✅ بله، حذف شود", callback_data='confirm_delete_yes')],
-        [InlineKeyboardButton("❌ خیر", callback_data='list_servers')]
+        [InlineKeyboardButton("❌ خیر، بازگشت", callback_data='cancel_action')]
     ]
-    await query.edit_message_text("⚠️ **آیا مطمئن هستید؟**\nاطلاعات سرور کاملا پاک می‌شود.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await query.edit_message_text("⚠️ **آیا مطمئن هستید؟**\nاطلاعات سرور کاملا پاک می‌شود و قابل برگشت نیست!", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     return CONFIRM_DELETE
 
 async def delete_server_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,29 +205,21 @@ async def delete_server_confirm(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(f"✅ سرور {name} حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منو", callback_data='main_menu')]]))
             await send_log(context, f"Server {name} DELETED.")
         except Exception as e:
-            await query.edit_message_text(f"خطا: {e}")
-    else:
-        await start(update, context)
+            await query.edit_message_text(f"خطا در حذف: {e}")
     return ConversationHandler.END
 
-# --- بازسازی (Rebuild) ---
+# --- نصب مجدد (Rebuild) ---
 async def pre_rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     sid = int(query.data.split('_')[2])
     context.user_data['server_id'] = sid
     
-    # نمایش لیست جدید سیستم‌عامل‌ها
     keyboard = []
-    row = []
-    for i, img in enumerate(OS_IMAGES):
-        row.append(InlineKeyboardButton(img, callback_data=f"rebuild_img_{img}"))
-        if (i + 1) % 2 == 0:
-            keyboard.append(row)
-            row = []
-    if row: keyboard.append(row)
+    for img in OS_IMAGES:
+        keyboard.append([InlineKeyboardButton(img, callback_data=f"rebuild_img_{img}")])
     
-    keyboard.append([InlineKeyboardButton("❌ انصراف", callback_data="main_menu")])
-    await query.edit_message_text("💿 سیستم عامل جدید را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard.append([InlineKeyboardButton("❌ انصراف", callback_data="cancel_action")])
+    await query.edit_message_text("💿 سیستم عامل جدید را انتخاب کنید (اطلاعات فعلی پاک می‌شود):", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_IMAGE_REBUILD
 
 async def do_rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -229,19 +237,19 @@ async def do_rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"خطا: {e}")
     return ConversationHandler.END
 
-# --- ساخت سرور جدید (STEP BY STEP) ---
+# --- سناریوی ساخت سرور (FIXED) ---
 
-# 1. گرفتن نام
+# 1. شروع و گرفتن نام
 async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("📝 **نام سرور** را بنویسید (مثلاً: vpn-server):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ کنسل", callback_data="cancel_action")]]))
+    keyboard = [[InlineKeyboardButton("❌ کنسل", callback_data="cancel_action")]]
+    await query.edit_message_text("📝 **نام سرور** را به انگلیسی بنویسید (مثلاً: vpn-1):", reply_markup=InlineKeyboardMarkup(keyboard))
     return CREATE_NAME
 
 async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['new_name'] = update.message.text
     
-    # 2. انتخاب معماری (جدید)
     keyboard = [
         [InlineKeyboardButton("🔵 Intel (Series CX)", callback_data='arch_intel')],
         [InlineKeyboardButton("🔴 AMD (Series CPX)", callback_data='arch_amd')],
@@ -250,52 +258,47 @@ async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⚙️ **نوع پردازنده** را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_ARCH
 
-# 3. انتخاب پلن بر اساس معماری
+# 2. انتخاب پلن
 async def select_arch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     arch = query.data
     
+    # اینجا پلن‌های معتبر را لود می‌کنیم
     if arch == 'arch_intel':
         plans = INTEL_PLANS
-        title = "🔵 پلن‌های Intel"
     else:
         plans = AMD_PLANS
-        title = "🔴 پلن‌های AMD"
     
     keyboard = []
     row = []
     for p in plans:
-        row.append(InlineKeyboardButton(p.upper(), callback_data=p))
+        row.append(InlineKeyboardButton(p.upper(), callback_data=p)) # p = 'cx22' مثلا
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row: keyboard.append(row)
     
     keyboard.append([InlineKeyboardButton("❌ کنسل", callback_data="cancel_action")])
-    await query.edit_message_text(f"📊 یکی از {title} را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"📊 یکی از پلن‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
     return CREATE_TYPE
 
-# 4. انتخاب سیستم عامل
+# 3. انتخاب سیستم عامل
 async def create_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data['new_type'] = query.data
+    # دیتای دکمه (مثلا cx22) اینجا ذخیره میشه
+    context.user_data['new_type'] = query.data 
     
-    # چیدمان دکمه‌های سیستم عامل
     keyboard = []
-    row = []
-    for i, img in enumerate(OS_IMAGES):
-        row.append(InlineKeyboardButton(img, callback_data=img))
-        if (i + 1) % 2 == 0:
-            keyboard.append(row)
-            row = []
-    if row: keyboard.append(row)
+    for img in OS_IMAGES:
+        keyboard.append([InlineKeyboardButton(img, callback_data=img)])
     
+    keyboard.append([InlineKeyboardButton("❌ کنسل", callback_data="cancel_action")])
     await query.edit_message_text("💿 **سیستم عامل** را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
     return CREATE_IMAGE
 
-# 5. ساخت نهایی
+# 4. ساخت نهایی
 async def create_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -304,44 +307,48 @@ async def create_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = context.user_data['new_name']
     server_type = context.user_data['new_type']
     
-    await query.edit_message_text("⏳ در حال ساخت سرور... (ممکن است چند ثانیه طول بکشد)")
+    await query.edit_message_text("⏳ در حال ساخت سرور... (لطفاً صبر کنید)")
     
     try:
+        # اینجا نام پلن (مثلا cx22) مستقیما به API ارسال میشه
         response = hetzner.servers.create(
             name=name,
             server_type=ServerType(name=server_type),
             image=Image(name=image),
-            location=Location(name="nbg1") # نورنبرگ آلمان
+            location=Location(name="nbg1") 
         )
         server = response.server
         root_pass = response.root_password
         
         msg = (
-            f"✅ **سرور ساخته شد!**\n\n"
+            f"✅ **سرور با موفقیت ساخته شد!**\n\n"
             f"Name: `{server.name}`\n"
             f"IP: `{server.public_net.ipv4.ip}`\n"
-            f"Pass: `{root_pass}`\n"
-            f"OS: {image}\n"
-            f"Type: {server_type}\n\n"
-            f"⚠️ پسورد را حتما ذخیره کنید."
+            f"Pass: `{root_pass}`\n\n"
+            f"⚠️ پسورد را ذخیره کنید."
         )
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منوی اصلی", callback_data='main_menu')]]))
-        await send_log(context, f"Created Server: {name} ({server_type} / {image})")
+        await send_log(context, f"Created Server: {name} ({server_type})")
         
     except Exception as e:
-        await query.edit_message_text(f"❌ خطا: {e}")
+        await query.edit_message_text(f"❌ خطا: {e}\n(اگر خطای Invalid Input دیدید یعنی نام پلن یا ایمیج اشتباه است)", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data='main_menu')]]))
         
     return ConversationHandler.END
 
+# --- کنسل کردن کلی ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query: await query.answer()
+    if query: 
+        await query.answer("عملیات لغو شد.")
+    # بازگشت به منوی اصلی
     await start(update, context)
     return ConversationHandler.END
 
+# --- MAIN ---
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # تعریف هندلر مکالمه (ساخت، حذف، ریبیلد)
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(create_start, pattern='^create_start$'),
@@ -350,25 +357,29 @@ if __name__ == '__main__':
         ],
         states={
             CREATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_name)],
-            SELECT_ARCH: [CallbackQueryHandler(select_arch)], # مرحله جدید
-            CREATE_TYPE: [CallbackQueryHandler(create_type)],
-            CREATE_IMAGE: [CallbackQueryHandler(create_final)],
+            SELECT_ARCH: [CallbackQueryHandler(select_arch)],
+            CREATE_TYPE: [CallbackQueryHandler(create_type)], # اینجا پلن انتخاب میشه
+            CREATE_IMAGE: [CallbackQueryHandler(create_final)], # اینجا ایمیج انتخاب میشه و سرور ساخته میشه
             CONFIRM_DELETE: [CallbackQueryHandler(delete_server_confirm)],
             SELECT_IMAGE_REBUILD: [CallbackQueryHandler(do_rebuild)],
         },
+        # فال‌بک برای دکمه‌های کنسل و بازگشت
         fallbacks=[
             CommandHandler('cancel', cancel),
             CallbackQueryHandler(cancel, pattern='^cancel_action$'),
-            CallbackQueryHandler(start, pattern='^main_menu$')
+            CallbackQueryHandler(cancel, pattern='^main_menu$')
         ]
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
+    
+    # هندلرهای عادی (خارج از مکالمه)
     app.add_handler(CallbackQueryHandler(list_servers, pattern='^list_servers$'))
     app.add_handler(CallbackQueryHandler(list_plans, pattern='^list_plans$'))
     app.add_handler(CallbackQueryHandler(power_actions, pattern='^act_'))
     app.add_handler(CallbackQueryHandler(manage_server, pattern='^manage_'))
+    app.add_handler(CallbackQueryHandler(start, pattern='^main_menu$')) # هندلر بازگشت به منوی اصلی
 
-    print("Bot Started...")
+    print("Bot Started (Updated)...")
     app.run_polling()
