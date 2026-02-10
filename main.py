@@ -1,225 +1,198 @@
 import os
 import logging
-import asyncio
-import subprocess
-from ping3 import ping
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
-)
-from hcloud import Client
-from hcloud.server_types.domain import ServerType
-from hcloud.images.domain import Image
-from hcloud.locations.domain import Location
 from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+from hcloud import Client
+from hcloud.images import Image
+from hcloud.server_types import ServerType
 
-# --- تنظیمات اولیه ---
+# تنظیمات لاگینگ
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# بارگذاری متغیرها
 load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 HETZNER_TOKEN = os.getenv("HETZNER_TOKEN")
-LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
-
-# آی‌پی سروری که باید مانیتور شود (توسط ربات پر می‌شود یا دستی وارد کنید)
-# نکته: این متغیر با هر بار ساخت سرور جدید آپدیت می‌شود
-MONITORED_SERVER_ID = None 
-CHECK_INTERVAL = 60  # هر چند ثانیه چک کند
-FAILURE_THRESHOLD = 3  # بعد از چند بار شکست، آی‌پی عوض شود
 
 # اتصال به هتزنر
-hetzner = Client(token=HETZNER_TOKEN)
-
-# مراحل گفتگو
-CREATE_NAME, CREATE_LOC, SELECT_ARCH, CREATE_TYPE, CREATE_IMAGE, CONFIRM_DELETE, CONFIRM_RECREATE, SELECT_IMAGE_REBUILD = range(8)
-
-# تنظیم لاگ
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# --- داده‌های ثابت ---
-PLANS = {'intel': ['cx22', 'cx32', 'cx42'], 'amd': ['cpx11', 'cpx21', 'cpx31']}
-LOCATIONS = {'nbg1': '🇩🇪 Nuremberg', 'fsn1': '🇩🇪 Falkenstein', 'hel1': '🇫🇮 Helsinki', 'ash': '🇺🇸 Ashburn', 'hil': '🇺🇸 Hillsboro'}
-OS_IMAGES = ["ubuntu-24.04", "ubuntu-22.04", "debian-12", "alma-9"]
+hclient = Client(token=HETZNER_TOKEN)
 
 # --- توابع کمکی ---
-async def check_admin(update: Update):
-    if update.effective_user.id != ADMIN_ID:
-        await update.effective_message.reply_text("⛔ دسترسی غیرمجاز.")
-        return False
-    return True
+def check_admin(user_id):
+    return user_id == ADMIN_ID
 
-async def send_log(app, msg: str):
-    if LOG_CHANNEL_ID:
-        try:
-            await app.bot.send_message(chat_id=LOG_CHANNEL_ID, text=f"📝 {msg}")
-        except: pass
-
-# --- سیستم هوشمند تعویض آی‌پی (WATCHDOG) ---
-async def update_tunnel_config(new_ip):
-    """
-    این تابع وقتی آی‌پی جدید ساخته شد اجرا می‌شود.
-    شما باید دستورات لینوکسی برای آپدیت تانل خود را اینجا بنویسید.
-    """
-    try:
-        # مثال: تغییر آی‌پی در فایل کانفیگ و ریستارت سرویس
-        # دستور زیر یک نمونه است، باید با دستورات تانل خودتان جایگزین کنید
-        print(f"🔄 Updating Tunnel to IP: {new_ip}")
-        
-        # 1. اجرای اسکریپت شل برای تنظیم مجدد تانل
-        # subprocess.run(f"/root/update_tunnel.sh {new_ip}", shell=True)
-        
-        return True
-    except Exception as e:
-        logger.error(f"Failed to update tunnel: {e}")
-        return False
-
-async def auto_recreate_logic(app, server_id):
-    """منطق اصلی حذف و ساخت مجدد سرور بدون دخالت کاربر"""
-    try:
-        await send_log(app, "⚠️ **هشدار سیستم خودکار:**\nارتباط با سرور قطع شد! شروع عملیات تعویض آی‌پی...")
-        
-        # 1. دریافت اطلاعات سرور فعلی
-        old_server = hetzner.servers.get_by_id(server_id)
-        srv_name = old_server.name
-        srv_type = old_server.server_type.name
-        srv_loc = old_server.datacenter.location.name
-        srv_img = old_server.image.name if old_server.image else "ubuntu-22.04"
-        
-        # 2. حذف سرور
-        old_server.delete()
-        await send_log(app, "🔻 سرور فیلتر شده حذف شد.")
-        
-        # 3. ساخت سرور جدید
-        # نکته: اینجا می‌توانید User Data اضافه کنید که تانل سمت خارج خودکار نصب شود
-        user_data_script = """#!/bin/bash
-        # اینجا دستورات نصب تانل سمت خارج را بگذارید
-        # apt update && apt install -y ...
-        """
-        
-        res = hetzner.servers.create(
-            name=srv_name,
-            server_type=ServerType(name=srv_type),
-            image=Image(name=srv_img),
-            location=Location(name=srv_loc),
-            user_data=user_data_script
-        )
-        
-        new_server = res.server
-        new_ip = new_server.public_net.ipv4.ip
-        new_pass = res.root_password
-        
-        await send_log(app, f"✅ **آی‌پی جدید دریافت شد!**\nIP: `{new_ip}`\nPass: `{new_pass}`\nدر حال آپدیت تانل...")
-        
-        # 4. آپدیت تانل در سرور ایران
-        await update_tunnel_config(new_ip)
-        
-        # 5. آپدیت متغیر مانیتورینگ
-        global MONITORED_SERVER_ID
-        MONITORED_SERVER_ID = new_server.id
-        
-        await send_log(app, "🚀 سیستم مجدداً متصل شد. پایان عملیات.")
-        
-    except Exception as e:
-        await send_log(app, f"❌ خطای بحرانی در سیستم خودکار:\n{e}")
-
-async def watchdog_task(app):
-    """تاسک پس‌زمینه که دائم پینگ می‌گیرد"""
-    fail_count = 0
-    logger.info("Watchdog started...")
-    
-    while True:
-        await asyncio.sleep(CHECK_INTERVAL)
-        
-        if not MONITORED_SERVER_ID:
-            continue
-            
-        try:
-            server = hetzner.servers.get_by_id(MONITORED_SERVER_ID)
-            ip = server.public_net.ipv4.ip
-            
-            # تست پینگ (یا می‌توانید پورت تانل را چک کنید)
-            response = ping(ip, timeout=2)
-            
-            if response is None or response is False:
-                fail_count += 1
-                logger.warning(f"Ping failed for {ip} ({fail_count}/{FAILURE_THRESHOLD})")
-            else:
-                fail_count = 0 # ریست شدن شمارنده اگر پینگ موفق بود
-            
-            # اگر تعداد خطاها از حد مجاز گذشت
-            if fail_count >= FAILURE_THRESHOLD:
-                logger.error("Threshold reached! Triggering auto-recreate.")
-                fail_count = 0 # جلوگیری از لوپ بی‌نهایت
-                await auto_recreate_logic(app, MONITORED_SERVER_ID)
-                
-        except Exception as e:
-            logger.error(f"Watchdog error: {e}")
-
-# --- هندلرهای تلگرام (بخش‌های قبلی با کمی تغییر) ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # شروع تسک مانیتورینگ اگر فعال نباشد
-    if 'watchdog_started' not in context.bot_data:
-        asyncio.create_task(watchdog_task(context.application))
-        context.bot_data['watchdog_started'] = True
-        
-    await show_main_menu(update, context)
-
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🤖 **پنل هوشمند مدیریت تانل**\nوضعیت مانیتورینگ: 🟢 فعال"
+def get_server_keyboard(server_id):
+    """ساخت دکمه‌های مدیریتی برای یک سرور"""
     keyboard = [
-        [InlineKeyboardButton("🖥 لیست سرورها", callback_data='list_servers')],
-        [InlineKeyboardButton("➕ ساخت سرور", callback_data='create_start')],
-        [InlineKeyboardButton("👁 تنظیم سرور مانیتورینگ", callback_data='set_monitor')]
+        [
+            InlineKeyboardButton("🟢 روشن کردن", callback_data=f"on_{server_id}"),
+            InlineKeyboardButton("🔴 خاموش کردن", callback_data=f"off_{server_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔄 ریبوت (Reset)", callback_data=f"reset_{server_id}"),
+            InlineKeyboardButton("♻️ نصب مجدد OS", callback_data=f"rebuild_{server_id}"),
+        ],
+        [
+            InlineKeyboardButton("🗑 حذف سرور", callback_data=f"del_confirm_{server_id}"),
+            InlineKeyboardButton("🔙 بازگشت", callback_data="list_servers"),
+        ]
     ]
-    if update.callback_query:
-        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    else:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    return InlineKeyboardMarkup(keyboard)
+
+# --- هندلرها ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not check_admin(update.effective_user.id):
+        return
+    
+    keyboard = [[InlineKeyboardButton("🖥 لیست سرورها", callback_data="list_servers")]]
+    await update.message.reply_text(
+        "👋 سلام رئیس! به پنل مدیریت هتزنر خوش آمدید.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def list_servers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    servers = hetzner.servers.get_all()
-    keyboard = []
-    for s in servers:
-        icon = "👁‍🗨" if s.id == MONITORED_SERVER_ID else "☁️"
-        keyboard.append([InlineKeyboardButton(f"{icon} {s.name} ({s.public_net.ipv4.ip})", callback_data=f'manage_{s.id}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='main_menu')])
-    await query.edit_message_text("لیست سرورها (👁‍🗨 = تحت نظارت):", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def manage_server(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    sid = int(query.data.split('_')[1])
     
-    # دکمه‌ای برای فعال کردن مانیتورینگ روی این سرور خاص
+    try:
+        servers = hclient.servers.get_all()
+        if not servers:
+            await query.edit_message_text("❌ هیچ سروری یافت نشد.")
+            return
+
+        keyboard = []
+        for server in servers:
+            status_icon = "🟢" if server.status == "running" else "🔴"
+            # نمایش نام سرور + آی‌پی
+            btn_text = f"{status_icon} {server.name} ({server.public_net.ipv4.ip})"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"srv_{server.id}")])
+        
+        keyboard.append([InlineKeyboardButton("🔄 بروزرسانی لیست", callback_data="list_servers")])
+        
+        await query.edit_message_text(
+            "📋 لیست سرورهای فعال شما:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        await query.edit_message_text(f"خطا در دریافت لیست: {str(e)}")
+
+async def server_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    server_id = int(query.data.split("_")[1])
+    try:
+        server = hclient.servers.get_by_id(server_id)
+        
+        info = (
+            f"🖥 **نام سرور:** `{server.name}`\n"
+            f"🌐 **IP:** `{server.public_net.ipv4.ip}`\n"
+            f"💡 **وضعیت:** {server.status}\n"
+            f"📍 **دیتاسنتر:** {server.datacenter.name}\n"
+            f"💾 **ایمیج:** {server.image.name if server.image else 'Unknown'}\n"
+            f"⚙️ **مدل:** {server.server_type.name}"
+        )
+        
+        await query.edit_message_text(
+            info,
+            reply_markup=get_server_keyboard(server_id),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await query.edit_message_text(f"خطا: {str(e)}")
+
+async def server_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    action, server_id = data.split("_")[0], int(data.split("_")[1])
+    server = hclient.servers.get_by_id(server_id)
+
+    try:
+        if action == "on":
+            server.power_on()
+            await query.answer("دستور روشن شدن ارسال شد ✅", show_alert=True)
+        
+        elif action == "off":
+            server.power_off()
+            await query.answer("دستور خاموش شدن ارسال شد 💤", show_alert=True)
+            
+        elif action == "reset":
+            server.reset()
+            await query.answer("سرور ریست شد 🔄", show_alert=True)
+            
+        elif action == "rebuild":
+            # برای سادگی فعلا اوبونتو 22.04 را پیش‌فرض می‌گیریم
+            # در نسخه حرفه‌ای‌تر می‌توان منوی انتخاب سیستم عامل گذاشت
+            keyboard = [
+                [InlineKeyboardButton("⚠️ بله، نصب کن (Ubuntu 22.04)", callback_data=f"confirmrebuild_{server_id}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"srv_{server_id}")]
+            ]
+            await query.edit_message_text(
+                "⚠️ **هشدار:** با نصب مجدد، تمام اطلاعات سرور پاک می‌شود!\nآیا مطمئن هستید؟",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+
+        elif action == "confirmrebuild":
+            image = hclient.images.get_by_name("ubuntu-22.04")
+            server.rebuild(image=image)
+            await query.edit_message_text("✅ دستور نصب مجدد سیستم عامل صادر شد.\nپسورد جدید به ایمیل شما ارسال می‌شود.", 
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="list_servers")]]))
+            return
+
+        elif action == "del": # مرحله تایید حذف
+            # این هندلر در پایین جداگانه هندل می‌شود اما اینجا برای یکپارچگی ذکر شد
+            pass
+
+        # بروزرسانی صفحه
+        await server_details(update, context)
+
+    except Exception as e:
+        await query.answer(f"خطا: {str(e)}", show_alert=True)
+
+async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    server_id = int(query.data.split("_")[2])
+    
     keyboard = [
-        [InlineKeyboardButton("👁 تنظیم به عنوان هدف مانیتورینگ", callback_data=f'setmon_{sid}')],
-        [InlineKeyboardButton("♻️ تغییر دستی آی‌پی", callback_data=f'pre_recreate_{sid}')],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data='list_servers')]
+        [InlineKeyboardButton("💀 بله، حذف کن Forever", callback_data=f"realdelete_{server_id}")],
+        [InlineKeyboardButton("❌ منصرف شدم", callback_data=f"srv_{server_id}")]
     ]
-    await query.edit_message_text(f"مدیریت سرور {sid}", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        "🚨 **هشدار بسیار جدی** 🚨\n\nآیا مطمئن هستید که می‌خواهید این سرور را کامل حذف کنید؟\nاین عملیات غیرقابل بازگشت است!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
 
-async def set_monitor_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def real_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    sid = int(query.data.split('_')[1])
-    global MONITORED_SERVER_ID
-    MONITORED_SERVER_ID = sid
-    await query.answer("✅ این سرور به لیست مانیتورینگ اضافه شد.", show_alert=True)
-    await list_servers(update, context)
+    server_id = int(query.data.split("_")[1])
+    try:
+        hclient.servers.get_by_id(server_id).delete()
+        await query.edit_message_text("🗑 سرور با موفقیت حذف شد.", 
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="list_servers")]]))
+    except Exception as e:
+        await query.edit_message_text(f"خطا در حذف: {str(e)}")
 
-# --- (بقیه توابع مثل create_server و recreate که قبلاً داشتیم اینجا می‌آیند) ---
-# به دلیل محدودیت فضا، توابع create و غیره همان کدهای قبلی هستند
-# فقط تابع auto_recreate_logic کار اصلی را انجام می‌دهد.
-
+# --- اجرای برنامه ---
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
-    
-    # هندلرها
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(list_servers, pattern='^list_servers$'))
-    app.add_handler(CallbackQueryHandler(manage_server, pattern='^manage_'))
-    app.add_handler(CallbackQueryHandler(set_monitor_target, pattern='^setmon_'))
-    app.add_handler(CallbackQueryHandler(show_main_menu, pattern='^main_menu$'))
-    
-    print("Bot is Running with AI Watchdog...")
+    app.add_handler(CallbackQueryHandler(list_servers, pattern="^list_servers$"))
+    app.add_handler(CallbackQueryHandler(server_details, pattern="^srv_"))
+    app.add_handler(CallbackQueryHandler(delete_confirm, pattern="^del_confirm_"))
+    app.add_handler(CallbackQueryHandler(real_delete, pattern="^realdelete_"))
+    app.add_handler(CallbackQueryHandler(server_actions, pattern="^(on|off|reset|rebuild|confirmrebuild)_"))
+
+    print("Bot is running...")
     app.run_polling()
